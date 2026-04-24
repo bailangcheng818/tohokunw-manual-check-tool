@@ -1,0 +1,162 @@
+openapi: 3.0.0
+info:
+  title: tohokunw-manual-check-tool
+  version: 1.0.0
+  description: Unified document generation and Excel manual-check helper API.
+servers:
+  - url: http://host.docker.internal:3456
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+  /schema:
+    get:
+      operationId: get_schema
+      summary: API overview
+      responses:
+        '200':
+          description: API schema overview
+  /schema/comparison:
+    get:
+      operationId: get_comparison_schema
+      summary: Get comparison document schema prompt context
+      responses:
+        '200':
+          description: Comparison document schema
+  /schema/manual:
+    get:
+      operationId: get_manual_schema
+      summary: Get manual document schema prompt context
+      responses:
+        '200':
+          description: Manual document schema
+  /schema/excel/{file}:
+    get:
+      operationId: read_excel_headers
+      summary: Read Excel header row
+      parameters:
+        - name: file
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: sheet
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Excel headers
+  /generate:
+    post:
+      operationId: generate_comparison_doc
+      summary: Generate comparison docx
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - spec
+              properties:
+                spec:
+                  type: object
+                output_filename:
+                  type: string
+                return_base64:
+                  type: boolean
+      responses:
+        '200':
+          description: Generated file metadata
+  /generate/manual:
+    post:
+      operationId: generate_manual_doc
+      summary: Generate manual docx
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - spec
+              properties:
+                spec:
+                  type: object
+                output_filename:
+                  type: string
+                return_base64:
+                  type: boolean
+      responses:
+        '200':
+          description: Generated file metadata
+  /excel/append-row:
+    post:
+      operationId: append_excel_row
+      summary: Append row data to Excel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - file_path
+              properties:
+                file_path:
+                  type: string
+                sheet:
+                  type: string
+                data:
+                  type: object
+                row:
+                  type: array
+                  items: {}
+                rows:
+                  type: array
+                  items:
+                    type: array
+                    items: {}
+                header:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        '200':
+          description: Append result
+  /excel/edit-record:
+    post:
+      operationId: append_edit_record
+      summary: Append revision management record to Excel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - file_path
+                - document_meta
+              properties:
+                file_path:
+                  type: string
+                sheet:
+                  type: string
+                document_meta:
+                  type: object
+                  properties:
+                    file_type:
+                      type: string
+                    file_name:
+                      type: string
+                    main_changes:
+                      type: string
+      responses:
+        '200':
+          description: Append result

@@ -1,0 +1,30 @@
+{
+  "name": "tohokunw-manual-check-tool",
+  "version": "1.0.0",
+  "description": "Unified MCP/HTTP tool for Tohoku NW manual check document and Excel workflows",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node --env-file=.env src/index.js",
+    "start:http": "node --env-file=.env src/http-server.js",
+    "dev": "node --env-file=.env --watch src/http-server.js",
+    "test:syntax": "node --check src/index.js && node --check src/http-server.js && node --check src/excel-tools.js"
+  },
+  "dependencies": {
+    "@google-cloud/vertexai": "^1.12.0",
+    "@google/genai": "^1.50.1",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "cors": "^2.8.5",
+    "docx": "^9.5.3",
+    "exceljs": "^4.4.0",
+    "express": "^4.18.2",
+    "jszip": "^3.10.1",
+    "uuid": "^13.0.0",
+    "word-extractor": "^1.0.4",
+    "xlsx": "^0.18.5",
+    "zod": "^3.22.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

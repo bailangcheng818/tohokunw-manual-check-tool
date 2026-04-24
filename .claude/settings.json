@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /Users/bailangcheng/Documents/dev/tohoku-poc/tohokunw-manual-check-tool/src/*.js)",
+      "Bash(npm install *)",
+      "Bash(npm audit *)"
+    ]
+  }
+}
