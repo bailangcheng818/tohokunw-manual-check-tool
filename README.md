@@ -1,15 +1,16 @@
 # tohokunw-manual-check-tool
 
-`excel-mcp` と `docx-mcp` の機能を、既存互換を保ちながら 1 つの MCP/HTTP サービスにまとめたツールです。
+DOCX 生成・Excel 操作・ローカルファイル探索を 1 つの MCP/HTTP サービスにまとめたツールです。ポート **3456** で稼働します。
 
-既存の生成ロジックはできるだけ薄いラッパーで呼び出しているため、元の `excel-mcp` / `docx-mcp` ディレクトリには影響しません。
+旧 `tohoku-manual-check-tool-excel`（ポート 3457）の Excel 機能はすべてここに統合済みです。Dify ワークフローのポート番号を 3457 → 3456 に変更するだけで移行できます（パスは後方互換）。
 
 ## 方針
 
 - `src/index.js`: MCP stdio entrypoint
 - `src/http-server.js`: HTTP entrypoint for Dify, workflow tools, local API calls
 - `src/asset-registry.js`: document asset registry. New document formats can be added here.
-- `src/excel-tools.js`: Excel tool adapter. Existing `excel-writer.js` is reused.
+- `src/excel-tools.js`: Excel tool adapter. `excel-writer.js` is reused.
+- `src/file-discovery.js`: local file discovery — list manual folders and read primary DOCX + attachments.
 - `src/docx-generator.js` / `src/manual-generator.js`: Word generation adapters reused from the existing docx flow.
 
 Future expansion points are intentionally separated:
@@ -70,8 +71,9 @@ PORT=3456
 OUTPUT_DIR=~/Desktop/tohokunw-manual-check-output
 ```
 
+## Endpoints
 
-Core endpoints:
+### Document generation
 
 - `GET /health`
 - `GET /schema`
@@ -79,13 +81,28 @@ Core endpoints:
 - `GET /schema/assets/:asset_type`
 - `POST /generate/:asset_type`
 - `POST /generate/:asset_type/download`
-- `GET /schema/excel`
-- `GET /schema/excel/:file`
+- `POST /ingest`
+- `POST /generate/from-edit`
+
+### File discovery
+
+- `GET /list-files` — list manual folders under `MANUAL_DATABASE_DIR`; includes manifest summary when pre-ingested
+- `POST /read-file` — read a manual folder; serves full content + image summaries from cache when pre-ingested
+- `POST /pre-ingest-folder` — run full ingest (text + images + summary + attachments) and persist to manifest cache
+- `GET /ingest-status` — return the full manifest (which folders have been pre-ingested)
+
+### Excel
+
+- `GET /schema/excel` — usage guidance
+- `GET /schema/excel/:file` — read workbook headers
+- `GET /schema/:file` — backward-compat alias for the above (matches files not caught by specific `/schema/*` routes)
 - `POST /excel/append-row`
 - `POST /excel/update-cell`
 - `POST /excel/edit-record`
+- `POST /excel/update-row` — update cells in a specific row by key-value
+- `GET /find-row/:file?column=&value=` — search for a row by column value
 
-Backward-compatible endpoints:
+### Backward-compatible aliases
 
 - `GET /schema/comparison`
 - `GET /schema/manual`
@@ -95,7 +112,151 @@ Backward-compatible endpoints:
 - `POST /generate/manual/download`
 - `POST /append-row`
 - `POST /update-cell`
+- `POST /update-row`
 - `POST /edit-record`
+
+## File Discovery
+
+`MANUAL_DATABASE_DIR`（デフォルト: `~/Desktop/tohokunw-manual-database`）の下に、マニュアルごとのフォルダを置く構造を想定しています。
+
+```
+MANUAL_DATABASE_DIR/
+  保安規程_v3/
+    保安規程_v3.docx          ← プライマリ文書（フォルダ名と一致するファイルが優先）
+    気づき管理表(AI用).xlsx    ← 添付 Excel（pre-ingest 時に処理）
+    別添1_フロー図.docx        ← 添付 Word
+  緊急対応マニュアル/
+    緊急対応マニュアル.docx
+```
+
+### GET /list-files
+
+| Query param | Default | Description |
+|-------------|---------|-------------|
+| `folder` | — | `MANUAL_DATABASE_DIR` 下のサブフォルダ名（省略時は直下） |
+| `extensions` | `.docx,.doc,.xlsx,.xls` | 対象拡張子（カンマ区切り） |
+
+Response（`POST /pre-ingest-folder` 実行後はマニフェストデータが付加される）:
+
+```json
+{
+  "folder": "/absolute/path",
+  "manuals": [
+    {
+      "name": "保安規程_v3",
+      "primary_doc": "保安規程_v3.docx",
+      "type": "word",
+      "ext": ".docx",
+      "size_kb": 142,
+      "modified": "2025-04-20T10:32:00.000Z",
+      "attachments": [
+        { "name": "気づき管理表(AI用).xlsx", "type": "excel", "ext": ".xlsx", "size_kb": 38 }
+      ],
+      "ref_id": "uuid-or-null",
+      "images_analyzed": true,
+      "summary": "本文書は通信工事の共通仕様を定めたものである。",
+      "effective_date": "2024-04-01",
+      "key_topics": ["工事仕様", "安全基準", "検査手順"],
+      "document_type": "仕様書",
+      "attachment_summaries": [
+        {
+          "name": "気づき管理表(AI用).xlsx",
+          "type": "excel",
+          "ref_id": "uuid2",
+          "sheet_names": ["気づき管理表"],
+          "sheets": { "気づき管理表": { "row_count": 50, "col_count": 10, "headers": ["入力月日", ...] } }
+        }
+      ]
+    }
+  ],
+  "count": 1
+}
+```
+
+`summary` / `effective_date` / `key_topics` / `attachment_summaries` は `POST /pre-ingest-folder` 実行後に付加されます。未実行の場合は省略されます。
+
+### POST /read-file
+
+Request:
+
+```json
+{
+  "folder_name": "保安規程_v3",
+  "mode": "full"
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `folder_name` | ✅ | フォルダ名のみ（`/` や `..` を含む値は 400 エラー） |
+| `mode` | — | `full`（テキスト抽出、デフォルト）または `schema`（Excel ヘッダーのみ） |
+
+Response（`pre-ingest` 済みの場合は cache から即返却）:
+
+```json
+{
+  "folder_name": "保安規程_v3",
+  "ref_id": "uuid",
+  "primary": {
+    "file": "保安規程_v3.docx",
+    "type": "word",
+    "content": "plain text of the document...",
+    "scheme": { "file_name": "...", "file_type": "docx", "paragraphs": 120, "tables": 3 }
+  },
+  "attachments": [...],
+  "images_analyzed": true,
+  "images_summary": [
+    { "ref": "img_001.jpg", "label": "接続図", "summary": "...", "figure_type": "system_diagram" }
+  ]
+}
+```
+
+`images_stale: true` が返る場合はプライマリ文書が更新されており、re-ingest が必要です。
+
+### POST /pre-ingest-folder
+
+一度だけ実行するセットアップ用エンドポイント。プライマリ DOCX + 添付 Excel をフル処理し、Gemini で要約を生成してマニフェストに永続化します。同じファイル（mtime 一致）を再度実行した場合は即座に `cached: true` を返します。
+
+Request:
+
+```json
+{ "folder_name": "保安規程_v3" }
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "folder_name": "保安規程_v3",
+  "ref_id": "uuid",
+  "images_analyzed": true,
+  "image_count": 3,
+  "summary": "本文書は...",
+  "effective_date": "2024-04-01",
+  "key_topics": ["工事仕様", ...],
+  "attachment_summaries": [...],
+  "cached": false
+}
+```
+
+### GET /ingest-status
+
+マニフェスト全体を返します。どのフォルダが pre-ingest 済みかを一覧できます。
+
+### 起動時の自動チェック
+
+サーバー起動後、`MANUAL_DATABASE_DIR` 内のフォルダを自動スキャンし、未処理または mtime が変更されたフォルダがある場合にターミナルで確認を求めます（インタラクティブモードのみ）:
+
+```
+[pre-ingest] 2 folder(s) not yet ingested or stale:
+  • 保安規程_v3
+  • 緊急対応マニュアル
+
+Run pre-ingest now? (y/N)
+```
+
+`y` を入力するとすべて順番に処理されます。Docker などの非インタラクティブ環境では自動的にスキップされます。
 
 ## MCP Tools
 
@@ -106,6 +267,9 @@ Document tools:
 - `validate_asset_spec`
 - `preview_asset`
 - `generate_asset_document`
+- `generate_asset_program`
+- `analyze_docx_format`
+- `generate_asset_scaffold`
 - `generate_comparison_doc`
 - `generate_manual_doc`
 - `get_template_schema`
@@ -117,8 +281,16 @@ Excel tools:
 - `get_excel_schema`
 - `append_row`
 - `update_cell`
+- `update_row`
+- `find_row`
 - `append_edit_record`
-- `get_schema` as a compatibility alias for Excel schema guidance
+- `get_schema` — compatibility alias for Excel schema guidance
+
+File discovery tools:
+
+- `list_files` — list manual folders in MANUAL_DATABASE_DIR (includes manifest summary when pre-ingested)
+- `read_file` — read a manual folder; serves from manifest cache when pre-ingested
+- `pre_ingest_folder` — (HTTP only) run full ingest + summarize + cache to manifest
 
 ## Ingest Pipeline
 

@@ -636,4 +636,4 @@ async function _doIngest({ files, difyBaseUrl, difyApiKey }) {
   return result;
 }
 
-module.exports = { handleIngest };
+module.exports = { handleIngest, processDocxFile, processDocFile, processExcelFile };

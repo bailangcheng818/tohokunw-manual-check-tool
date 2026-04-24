@@ -96,4 +96,59 @@ async function labelImage({ imageBuffer, mimeType = 'image/png', contextText = '
   }
 }
 
-module.exports = { isVertexEnabled, labelImage };
+const SUMMARIZE_PROMPT = `あなたは東北電力ネットワーク株式会社の通信関係マニュアル・基準類を読む文書解析エキスパートです。
+以下の文書テキスト（抜粋）を読み、以下のJSON形式のみで回答してください（前置き・コードブロック不要）：
+
+{
+  "summary": "文書の目的・内容を2〜3文で要約（日本語）",
+  "key_topics": ["主要なトピックを3〜5個の配列で"],
+  "effective_date": "施行日・改正日（YYYY-MM-DD形式。不明の場合はnull）",
+  "document_type": "仕様書 | 運用基準 | 取扱基準 | マニュアル | その他"
+}`;
+
+/**
+ * Summarize a document's text content using Gemini.
+ *
+ * @param {object} params
+ * @param {string} params.text - full or truncated document text
+ * @param {string} [params.fileName='']
+ * @returns {Promise<{summary: string, key_topics: string[], effective_date: string|null, document_type: string|null}>}
+ */
+async function summarizeDocument({ text, fileName = '' }) {
+  if (!isVertexEnabled()) {
+    return { summary: '', key_topics: [], effective_date: null, document_type: null };
+  }
+
+  const truncated = text.length > 6000 ? text.slice(0, 6000) + '\n...(以下省略)' : text;
+  const prompt = [
+    fileName ? `ファイル名: ${fileName}` : '',
+    SUMMARIZE_PROMPT,
+    '\n【文書テキスト】',
+    truncated,
+  ].filter(Boolean).join('\n\n');
+
+  const { GoogleGenAI } = require('@google/genai');
+  const ai = new GoogleGenAI({ vertexai: true, project: PROJECT, location: LOCATION });
+
+  const response = await ai.models.generateContent({
+    model: MODEL,
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+  });
+
+  const rawText = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const cleaned = stripCodeFences(rawText);
+
+  try {
+    const parsed = JSON.parse(cleaned);
+    return {
+      summary: String(parsed.summary || ''),
+      key_topics: Array.isArray(parsed.key_topics) ? parsed.key_topics.map(String) : [],
+      effective_date: parsed.effective_date || null,
+      document_type: parsed.document_type || null,
+    };
+  } catch {
+    return { summary: cleaned.slice(0, 300), key_topics: [], effective_date: null, document_type: null };
+  }
+}
+
+module.exports = { isVertexEnabled, labelImage, summarizeDocument };

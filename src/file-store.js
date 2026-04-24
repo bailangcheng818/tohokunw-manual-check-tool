@@ -5,6 +5,43 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { FILE_STORE_DIR } = require('./config');
 
+const MANIFEST_PATH = path.join(FILE_STORE_DIR, 'manifest.json');
+
+function _readManifest() {
+  if (!fs.existsSync(MANIFEST_PATH)) return {};
+  try { return JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf8')); } catch { return {}; }
+}
+
+function getManifestEntry(folderName) {
+  return _readManifest()[folderName] || null;
+}
+
+function setManifestEntry(folderName, entry) {
+  fs.mkdirSync(FILE_STORE_DIR, { recursive: true });
+  const manifest = _readManifest();
+  manifest[folderName] = entry;
+  fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2), 'utf8');
+}
+
+function readImagesMeta(ref_id) {
+  const imagesDir = path.join(FILE_STORE_DIR, ref_id, 'images');
+  if (!fs.existsSync(imagesDir)) return [];
+  const allFiles = fs.readdirSync(imagesDir);
+  return allFiles
+    .filter(f => f.endsWith('_meta.json'))
+    .sort()
+    .map(f => {
+      try {
+        const meta = JSON.parse(fs.readFileSync(path.join(imagesDir, f), 'utf8'));
+        const base = f.replace('_meta.json', '');
+        const imgFile = allFiles.find(x => x.startsWith(base + '.') && !x.endsWith('_meta.json'));
+        const ref = imgFile || base + '.png';
+        return { ref, ...meta };
+      } catch { return null; }
+    })
+    .filter(Boolean);
+}
+
 function _storeDir(ref_id) {
   return path.join(FILE_STORE_DIR, ref_id);
 }
@@ -104,4 +141,7 @@ module.exports = {
   writeImage,
   writeImageMeta,
   readOriginalBuffer,
+  getManifestEntry,
+  setManifestEntry,
+  readImagesMeta,
 };
