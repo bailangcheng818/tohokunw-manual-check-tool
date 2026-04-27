@@ -1,7 +1,7 @@
 'use strict';
 
-const { appendRows, getHeaders, updateCell } = require('./excel-writer');
-const { resolveOutputPath } = require('./config');
+const { appendRows, findRow, getHeaders, updateCell, updateRow } = require('./excel-writer');
+const { resolveManualPath } = require('./config');
 
 const EXCEL_TOOLS = [
   {
@@ -89,6 +89,36 @@ const EXCEL_TOOLS = [
     description: 'Backward-compatible alias for get_excel_schema.',
     inputSchema: { type: 'object', properties: {} },
   },
+  {
+    name: 'find_row',
+    description: 'Search an Excel file for the first row where a named column matches a value.',
+    inputSchema: {
+      type: 'object',
+      required: ['file_path', 'column', 'value'],
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path or filename relative to OUTPUT_DIR.' },
+        sheet: { type: 'string', description: 'Worksheet name. Defaults to the first sheet.' },
+        column: { type: 'string', description: 'Header name to match against.' },
+        value: { type: 'string', description: 'Value to search for.' },
+        header_row: { type: 'number', description: '1-based row number containing headers. Default: 1.' },
+      },
+    },
+  },
+  {
+    name: 'update_row',
+    description: 'Update multiple cells in a specific row of an Excel file using key-value data.',
+    inputSchema: {
+      type: 'object',
+      required: ['file_path', 'row_number', 'data'],
+      properties: {
+        file_path: { type: 'string', description: 'Absolute path or filename relative to OUTPUT_DIR.' },
+        sheet: { type: 'string', description: 'Worksheet name. Defaults to the first sheet.' },
+        row_number: { type: 'number', description: 'Target row (1-based, must be >= 2).' },
+        data: { type: 'object', description: 'Key-value pairs keyed by header name.' },
+        header_row: { type: 'number', description: '1-based row number containing headers. Default: 1.' },
+      },
+    },
+  },
 ];
 
 function excelSchemaDescription() {
@@ -119,7 +149,7 @@ function excelSchemaDescription() {
 
 async function handleAppendRow(args = {}) {
   const { sheet, row, rows, data, header } = args;
-  const file_path = resolveOutputPath(args.file_path);
+  const file_path = resolveManualPath(args.file_path);
 
   if (!file_path) return toolError('file_path is required');
   if (!data && !row && (!rows || rows.length === 0)) {
@@ -141,7 +171,7 @@ async function handleAppendRow(args = {}) {
 }
 
 async function handleUpdateCell(args = {}) {
-  const file_path = resolveOutputPath(args.file_path);
+  const file_path = resolveManualPath(args.file_path);
   if (!file_path) return toolError('file_path is required');
   if (args.column === undefined && (!args.header || !args.row)) {
     return toolError('Provide either column+value or header+row');
@@ -162,7 +192,7 @@ async function handleUpdateCell(args = {}) {
 }
 
 async function handleAppendEditRecord(args = {}) {
-  const file_path = resolveOutputPath(args.file_path);
+  const file_path = resolveManualPath(args.file_path);
   const documentMeta = args.document_meta || {};
 
   if (!file_path) return toolError('file_path is required');
@@ -189,12 +219,40 @@ async function handleAppendEditRecord(args = {}) {
 }
 
 async function handleReadExcelHeaders(args = {}) {
-  const file_path = resolveOutputPath(args.file_path);
+  const file_path = resolveManualPath(args.file_path);
   if (!file_path) return toolError('file_path is required');
 
   try {
     const headers = await getHeaders(file_path, args.sheet);
     return toolJson({ file_path, sheet: args.sheet || null, headers });
+  } catch (error) {
+    return toolError(error.message);
+  }
+}
+
+async function handleFindRow(args = {}) {
+  const file_path = resolveManualPath(args.file_path);
+  if (!file_path) return toolError('file_path is required');
+  if (!args.column) return toolError('column is required');
+  if (args.value === undefined || args.value === null) return toolError('value is required');
+
+  try {
+    const result = await findRow({ ...args, file_path });
+    return toolJson(result);
+  } catch (error) {
+    return toolError(error.message);
+  }
+}
+
+async function handleUpdateRow(args = {}) {
+  const file_path = resolveManualPath(args.file_path);
+  if (!file_path) return toolError('file_path is required');
+  if (!args.row_number) return toolError('row_number is required');
+  if (!args.data) return toolError('data is required');
+
+  try {
+    const result = await updateRow({ ...args, file_path });
+    return toolJson(result);
   } catch (error) {
     return toolError(error.message);
   }
@@ -206,6 +264,8 @@ async function handleExcelTool(name, args = {}) {
     case 'update_cell': return handleUpdateCell(args);
     case 'append_edit_record': return handleAppendEditRecord(args);
     case 'read_excel_headers': return handleReadExcelHeaders(args);
+    case 'find_row': return handleFindRow(args);
+    case 'update_row': return handleUpdateRow(args);
     case 'get_excel_schema':
     case 'get_schema':
       return toolJson(excelSchemaDescription());
@@ -232,6 +292,8 @@ module.exports = {
   handleAppendEditRecord,
   handleAppendRow,
   handleExcelTool,
+  handleFindRow,
   handleReadExcelHeaders,
   handleUpdateCell,
+  handleUpdateRow,
 };

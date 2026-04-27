@@ -382,6 +382,57 @@ async function extractDocxImages(zip) {
 }
 
 // ---------------------------------------------------------------------------
+// Header / footer extraction
+// ---------------------------------------------------------------------------
+
+async function extractHeadersFooters(zip) {
+  const relsXml = await zip.file('word/_rels/document.xml.rels')?.async('string') || '';
+  const relPattern = /Type="[^"]*\/(header|footer)"[^/]*Target="([^"]+)"/g;
+  const parts = [];
+  let m;
+  while ((m = relPattern.exec(relsXml)) !== null) {
+    parts.push({ role: m[1], target: m[2] });
+  }
+
+  const headers = [];
+  const footers = [];
+  for (const { role, target } of parts) {
+    const zipPath = target.startsWith('word/') ? target : `word/${target}`;
+    const xml = await zip.file(zipPath)?.async('string');
+    if (!xml) continue;
+    const paragraphs = [];
+    for (const pXml of (xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) || [])) {
+      const runs = extractRuns(pXml);
+      const text = runs.map(r => r.text).join('');
+      if (!text.trim()) continue;
+      const para_id = `p_${String(paragraphs.length + 1).padStart(3, '0')}`;
+      paragraphs.push({ para_id, xml_index: paragraphs.length, type: 'body', text, runs });
+    }
+    const entry = { part: target.replace(/^word\//, '').replace(/\.xml$/, ''), paragraphs };
+    (role === 'header' ? headers : footers).push(entry);
+  }
+  return { headers, footers };
+}
+
+// ---------------------------------------------------------------------------
+// Text box extraction
+// ---------------------------------------------------------------------------
+
+function extractTextboxes(docXml) {
+  const textboxes = [];
+  for (const [idx, txXml] of (docXml.match(/<w:txbx[\s\S]*?<\/w:txbx>/g) || []).entries()) {
+    const paragraphs = [];
+    for (const pXml of (txXml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) || [])) {
+      const runs = extractRuns(pXml);
+      const text = runs.map(r => r.text).join('');
+      if (text.trim()) paragraphs.push({ text, runs });
+    }
+    if (paragraphs.length > 0) textboxes.push({ index: idx, paragraphs });
+  }
+  return textboxes;
+}
+
+// ---------------------------------------------------------------------------
 // DOCX processing
 // ---------------------------------------------------------------------------
 
@@ -394,7 +445,7 @@ async function processDocxFile(buffer, ref_id) {
   const paragraphs = [];
   const contentLines = [];
 
-  for (const pXml of paragraphMatches) {
+  for (const [xmlIndex, pXml] of paragraphMatches.entries()) {
     const runs = extractRuns(pXml);
     const text = runs.map(r => r.text).join('');
     if (!text.trim()) continue;
@@ -404,9 +455,9 @@ async function processDocxFile(buffer, ref_id) {
     const alignMatch = pXml.match(/<w:jc[^>]+w:val="([^"]+)"/);
     const align = alignMatch ? alignMatch[1] : 'left';
 
-    const para = { text, runs, size, align };
     const type = classifyParagraph({ text, runs, size, align });
-    paragraphs.push({ type, text, size, align });
+    const para_id = `p_${String(paragraphs.length + 1).padStart(3, '0')}`;
+    paragraphs.push({ para_id, xml_index: xmlIndex, type, text, runs, size, align });
 
     if (type === 'title' || type === 'numbered_heading' || type === 'bracket_heading') {
       contentLines.push(`\n### ${text}`);
@@ -530,6 +581,9 @@ async function processDocxFile(buffer, ref_id) {
     }
   }
 
+  const { headers, footers } = await extractHeadersFooters(zip);
+  const textboxes = extractTextboxes(docXml);
+
   const scheme = {
     file_type: 'docx',
     paragraph_count: paragraphs.length,
@@ -540,6 +594,9 @@ async function processDocxFile(buffer, ref_id) {
     paragraphs,
     tables,
     drawing_pages: drawing_preview,
+    headers,
+    footers,
+    textboxes,
   };
 
   writeScheme(ref_id, scheme);

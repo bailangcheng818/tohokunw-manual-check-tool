@@ -22,7 +22,7 @@ const {
   handleUpdateRow,
 } = require('./excel-tools');
 const { HOST, MANUAL_DATABASE_DIR, OUTPUT_DIR, PORT, SERVICE_NAME, VERSION, safeFilename } = require('./config');
-const { listManualFolders, readManualFolder } = require('./file-discovery');
+const { listManualFolders, readManualFolder, collectFiles } = require('./file-discovery');
 const { handleIngest, processDocxFile, processDocFile, processExcelFile } = require('./ingest');
 const { createStore, getManifestEntry, setManifestEntry } = require('./file-store');
 const { summarizeDocument } = require('./vertex-ai');
@@ -354,7 +354,7 @@ async function runPreIngestFolder(folderName) {
     throw Object.assign(new Error(`Folder not found: ${normalizedName}`), { statusCode: 404 });
   }
 
-  const files = fs.readdirSync(folderPath, { withFileTypes: true }).filter(f => f.isFile());
+  const files = collectFiles(folderPath);
   let primaryFile = files.find(f => {
     const ext = path.extname(f.name).toLowerCase();
     return _PREINGEST_WORD_EXTS.has(ext) && f.name.normalize('NFC').slice(0, -ext.length) === normalizedName;
@@ -364,7 +364,7 @@ async function runPreIngestFolder(folderName) {
     throw Object.assign(new Error(`No Word document found in folder: ${normalizedName}`), { statusCode: 422 });
   }
 
-  const primaryPath = path.join(folderPath, primaryFile.name);
+  const primaryPath = primaryFile.fullPath;
   const primaryExt = path.extname(primaryFile.name).toLowerCase();
   const primaryMtime = fs.statSync(primaryPath).mtime.toISOString();
 
@@ -402,7 +402,7 @@ async function runPreIngestFolder(folderName) {
   for (const attFile of files) {
     const attExt = path.extname(attFile.name).toLowerCase();
     if (attFile.name === primaryFile.name || !_PREINGEST_EXCEL_EXTS.has(attExt)) continue;
-    const attPath = path.join(folderPath, attFile.name);
+    const attPath = attFile.fullPath;
     try {
       const attBuffer = fs.readFileSync(attPath);
       const attExtNoDot = attExt.replace('.', '');
@@ -450,11 +450,10 @@ async function checkPendingPreIngest() {
   for (const entry of entries) {
     const folderName = entry.name.normalize('NFC');
     const folderPath = path.join(MANUAL_DATABASE_DIR, folderName);
-    const primaryFile = fs.readdirSync(folderPath, { withFileTypes: true })
-      .filter(f => f.isFile())
+    const primaryFile = collectFiles(folderPath)
       .find(f => _PREINGEST_WORD_EXTS.has(path.extname(f.name).toLowerCase()));
     if (!primaryFile) continue;
-    const mtime = fs.statSync(path.join(folderPath, primaryFile.name)).mtime.toISOString();
+    const mtime = fs.statSync(primaryFile.fullPath).mtime.toISOString();
     const cached = getManifestEntry(folderName);
     if (!cached || cached.primary_mtime !== mtime) pending.push(folderName);
   }

@@ -277,4 +277,80 @@ function resolveByHeader(data, headers) {
   return row;
 }
 
-module.exports = { appendRows, updateCell, getHeaders, resolveByHeader };
+/**
+ * Search a sheet for the first row where a named column matches a value.
+ *
+ * @param {object} opts
+ * @param {string} opts.file_path - Absolute path to the .xlsx file
+ * @param {string} [opts.sheet]   - Sheet name (default: first sheet)
+ * @param {string} opts.column    - Header name to match against
+ * @param {string} opts.value     - Value to search for (compared as string)
+ * @param {number} [opts.header_row=1] - Row number containing headers
+ * @returns {Promise<{ found: boolean, row_number?: number, data?: object }>}
+ */
+async function findRow({ file_path, sheet, column, value, header_row = 1 }) {
+  if (!fs.existsSync(file_path)) throw new Error(`File not found: ${file_path}`);
+  const headers = await getHeaders(file_path, sheet, header_row);
+  const colDef = headers.find(h => h.name === column);
+  if (!colDef) return { found: false };
+
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(file_path);
+  const ws = sheet ? wb.getWorksheet(sheet) : wb.worksheets[0];
+  if (!ws) throw new Error('Sheet not found');
+
+  const lastRow = findLastDataRow(ws);
+  for (let r = header_row + 1; r <= lastRow; r++) {
+    const wsRow = ws.getRow(r);
+    const cellVal = String(wsRow.getCell(colDef.index).value ?? '');
+    if (cellVal === String(value)) {
+      const data = {};
+      headers.forEach(h => { data[h.name] = wsRow.getCell(h.index).value ?? null; });
+      return { found: true, row_number: r, data };
+    }
+  }
+  return { found: false };
+}
+
+/**
+ * Update multiple cells in a specific row using a key-value data object.
+ *
+ * @param {object} opts
+ * @param {string} opts.file_path  - Absolute path to the .xlsx file
+ * @param {string} [opts.sheet]    - Sheet name (default: first sheet)
+ * @param {number} opts.row_number - Target row (1-based, must be >= 2)
+ * @param {object} opts.data       - Key-value pairs keyed by header name
+ * @param {number} [opts.header_row=1] - Row number containing headers
+ * @returns {Promise<{ file_path, sheet, row_number, updated_columns, unmatched_keys }>}
+ */
+async function updateRow({ file_path, sheet, row_number, data, header_row = 1 }) {
+  if (!file_path) throw new Error('file_path is required');
+  if (!row_number || row_number < 2) throw new Error('row_number >= 2 is required');
+  if (!data || typeof data !== 'object') throw new Error('data object is required');
+  if (!fs.existsSync(file_path)) throw new Error(`File not found: ${file_path}`);
+
+  const headers = await getHeaders(file_path, sheet, header_row);
+  const colMap = {};
+  for (const h of headers) { if (h.name) colMap[h.name] = h.index; }
+
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(file_path);
+  const ws = sheet ? wb.getWorksheet(sheet) : wb.worksheets[0];
+  if (!ws) throw new Error('Sheet not found');
+
+  const wsRow = ws.getRow(row_number);
+  const updatedColumns = [];
+  const unmatchedKeys = [];
+  for (const [key, val] of Object.entries(data)) {
+    const colIndex = colMap[key];
+    if (!colIndex) { unmatchedKeys.push(key); continue; }
+    wsRow.getCell(colIndex).value = normalizeCell(val);
+    updatedColumns.push(key);
+  }
+  wsRow.commit();
+  await wb.xlsx.writeFile(file_path);
+
+  return { file_path, sheet: ws.name, row_number, updated_columns: updatedColumns, unmatched_keys: unmatchedKeys };
+}
+
+module.exports = { appendRows, updateCell, findRow, updateRow, getHeaders, resolveByHeader };

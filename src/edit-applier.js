@@ -49,6 +49,99 @@ function extractFirstRpr(runXml) {
   return m ? m[0] : '';
 }
 
+// ---------------------------------------------------------------------------
+// Run-level edit  (type: 'paragraph_runs')
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a <w:r> XML element from a run spec.
+ * baseRpr: raw <w:rPr>...</w:rPr> from the first original run (font/size passthrough).
+ * Spec properties (bold, underline, color) override anything in baseRpr.
+ */
+function buildRunXml(run, baseRpr = '') {
+  // Strip formatting tags from baseRpr so only font/size/language carry over
+  const cleanBase = baseRpr
+    .replace(/<w:b(?:\s[^>]*)?\s*\/>/g, '')
+    .replace(/<w:u[^>]*\/>/g, '')
+    .replace(/<w:color[^>]*\/>/g, '');
+
+  const props = [];
+  if (run.bold)      props.push('<w:b/>');
+  if (run.underline) props.push('<w:u w:val="single"/>');
+  if (run.color)     props.push(`<w:color w:val="${xmlEncode(run.color.replace('#', ''))}"/>`);
+
+  const rPrContent = cleanBase + props.join('');
+  const rPr = rPrContent ? `<w:rPr>${rPrContent}</w:rPr>` : '';
+  return `<w:r>${rPr}<w:t xml:space="preserve">${xmlEncode(run.text)}</w:t></w:r>`;
+}
+
+/**
+ * Replace all runs in a paragraph with runs built from runsSpec[].
+ * Preserves <w:pPr> and content outside the run region.
+ * Returns modified paragraph XML, or null if no runs found.
+ */
+function applyRunsEdit(paraXml, runsSpec) {
+  const runMatches = paraXml.match(/<w:r[ >][\s\S]*?<\/w:r>/g) || [];
+  if (runMatches.length === 0) return null;
+
+  const baseRpr = extractFirstRpr(runMatches[0]);
+  const newRunsXml = runsSpec
+    .filter(r => r.text)
+    .map(r => buildRunXml(r, baseRpr))
+    .join('');
+
+  const firstRunStart = paraXml.indexOf(runMatches[0]);
+  const lastRun = runMatches[runMatches.length - 1];
+  const lastRunEnd = paraXml.lastIndexOf(lastRun) + lastRun.length;
+  return paraXml.slice(0, firstRunStart) + newRunsXml + paraXml.slice(lastRunEnd);
+}
+
+/**
+ * Apply all paragraph_runs-type edits to the document XML string.
+ */
+function applyRunsEdits(docXml, edits) {
+  const runsEdits = edits.filter(e => e.type === 'paragraph_runs');
+  if (runsEdits.length === 0) return docXml;
+
+  for (const edit of runsEdits) {
+    const paraBlocks = docXml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) || [];
+    let replaced = false;
+
+    if (edit.xml_index != null) {
+      const block = paraBlocks[edit.xml_index];
+      if (block) {
+        const newBlock = applyRunsEdit(block, edit.runs);
+        if (newBlock !== null) {
+          docXml = docXml.replace(block, newBlock);
+          replaced = true;
+        }
+      }
+    }
+
+    if (!replaced && edit.old_text) {
+      for (const block of paraBlocks) {
+        if (extractFullText(block).trim() === edit.old_text.trim()) {
+          const newBlock = applyRunsEdit(block, edit.runs);
+          if (newBlock !== null) {
+            docXml = docXml.replace(block, newBlock);
+            replaced = true;
+            break;
+          }
+        }
+      }
+    }
+
+    if (!replaced) {
+      console.warn(`[edit-applier] paragraph_runs: no match para_id=${edit.para_id || '?'}`);
+    }
+  }
+  return docXml;
+}
+
+// ---------------------------------------------------------------------------
+// Paragraph edit  (type: 'paragraph')
+// ---------------------------------------------------------------------------
+
 /**
  * Replace paragraph text using "keep first run's formatting" strategy.
  * Returns the modified paragraph XML, or null if old_text doesn't match.
@@ -79,29 +172,45 @@ function applyParagraphEdit(paraXml, oldText, newText) {
 
 /**
  * Apply all paragraph-type edits to the document XML string.
+ * Supports xml_index-based direct addressing (primary) with old_text fallback.
  */
 function applyParagraphEdits(docXml, edits) {
   const paraEdits = edits.filter(e => e.type === 'paragraph');
   if (paraEdits.length === 0) return docXml;
 
-  // Split into paragraph blocks preserving surrounding content
-  // We process by finding and replacing individual <w:p> blocks
   for (const edit of paraEdits) {
     const paraBlocks = docXml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) || [];
     let replaced = false;
 
-    for (const block of paraBlocks) {
-      const newBlock = applyParagraphEdit(block, edit.old_text, edit.new_text);
-      if (newBlock !== null) {
-        // Replace first matching occurrence only
-        docXml = docXml.replace(block, newBlock);
-        replaced = true;
-        break;
+    // Primary: xml_index による直接アドレス指定
+    if (edit.xml_index != null) {
+      const block = paraBlocks[edit.xml_index];
+      if (block) {
+        if (edit.old_text && extractFullText(block).trim() !== edit.old_text.trim()) {
+          console.warn(`[edit-applier] para_id=${edit.para_id || edit.xml_index}: text mismatch (expected "${edit.old_text.slice(0, 40)}", found "${extractFullText(block).slice(0, 40)}")`);
+        }
+        const newBlock = applyParagraphEdit(block, extractFullText(block), edit.new_text);
+        if (newBlock !== null) {
+          docXml = docXml.replace(block, newBlock);
+          replaced = true;
+        }
+      }
+    }
+
+    // Fallback: 従来の old_text マッチ（後方互換）
+    if (!replaced && edit.old_text) {
+      for (const block of paraBlocks) {
+        const newBlock = applyParagraphEdit(block, edit.old_text, edit.new_text);
+        if (newBlock !== null) {
+          docXml = docXml.replace(block, newBlock);
+          replaced = true;
+          break;
+        }
       }
     }
 
     if (!replaced) {
-      console.warn(`[edit-applier] No matching paragraph for old_text: "${edit.old_text.slice(0, 60)}"`);
+      console.warn(`[edit-applier] No matching paragraph for para_id=${edit.para_id || '?'} old_text="${(edit.old_text || '').slice(0, 60)}"`);
     }
   }
 
@@ -253,9 +362,24 @@ async function applyEdits({ ref_id, edits, output_filename, return_base64 = fals
 
   // Apply edits
   docXml = applyParagraphEdits(docXml, edits);
+  docXml = applyRunsEdits(docXml, edits);
   docXml = applyTableCellEdits(docXml, edits);
 
   zip.file('word/document.xml', docXml);
+
+  // Apply header / footer edits
+  const hfEdits = edits.filter(e => e.type === 'header_paragraph' || e.type === 'footer_paragraph');
+  for (const edit of hfEdits) {
+    const zipPath = `word/${edit.part}.xml`;
+    let partXml = await zip.file(zipPath)?.async('string');
+    if (!partXml) {
+      console.warn(`[edit-applier] header/footer part not found: ${zipPath}`);
+      continue;
+    }
+    const mockEdits = [{ type: 'paragraph', xml_index: edit.xml_index, old_text: edit.old_text, new_text: edit.new_text, para_id: edit.para_id }];
+    partXml = applyParagraphEdits(partXml, mockEdits);
+    zip.file(zipPath, partXml);
+  }
 
   const outputBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
 

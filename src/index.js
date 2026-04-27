@@ -17,6 +17,7 @@ const {
   validateAssetSpec,
 } = require('./asset-registry');
 const { EXCEL_TOOLS, handleExcelTool } = require('./excel-tools');
+const { listManualFolders, readManualFolder } = require('./file-discovery');
 const { generateAssetProgram } = require('./program-generator');
 const { analyzeDocxTemplateBase64 } = require('./template-analyzer');
 const { generateAssetScaffold } = require('./scaffold-generator');
@@ -180,7 +181,33 @@ const DOCUMENT_TOOLS = [
   },
 ];
 
-const TOOLS = [...DOCUMENT_TOOLS, ...EXCEL_TOOLS];
+const FILE_TOOLS = [
+  {
+    name: 'list_files',
+    description: 'List manual folders (Word + Excel) available in the local output directory. Each folder is one manual unit containing a primary document and optional attachments.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        folder: { type: 'string', description: 'Subfolder name relative to OUTPUT_DIR. Defaults to OUTPUT_DIR root.' },
+        extensions: { type: 'string', description: 'Comma-separated file extensions to include. Default: ".docx,.doc,.xlsx,.xls".' },
+      },
+    },
+  },
+  {
+    name: 'read_file',
+    description: 'Read and extract text content from a local manual folder for LLM processing. Returns a stable ref_id usable with /generate/from-edit.',
+    inputSchema: {
+      type: 'object',
+      required: ['folder_name'],
+      properties: {
+        folder_name: { type: 'string', description: 'Name of the manual folder under OUTPUT_DIR (no path separators).' },
+        mode: { type: 'string', enum: ['full', 'schema'], description: 'full = extract text content; schema = headers only (Excel). Default: full.' },
+      },
+    },
+  },
+];
+
+const TOOLS = [...DOCUMENT_TOOLS, ...EXCEL_TOOLS, ...FILE_TOOLS];
 
 async function handleDocumentTool(name, args = {}) {
   if (name === 'list_asset_types') {
@@ -248,6 +275,24 @@ async function handleDocumentTool(name, args = {}) {
 
   if (name === 'preview_sections') {
     return toolText(getAssetDefinition('comparison_doc').preview(args.spec || {}));
+  }
+
+  if (name === 'list_files') {
+    try {
+      const result = await listManualFolders({ folder: args.folder, extensions: args.extensions });
+      return toolJson(result);
+    } catch (err) {
+      return toolError(err.message);
+    }
+  }
+
+  if (name === 'read_file') {
+    try {
+      const result = await readManualFolder({ folder_name: args.folder_name, mode: args.mode || 'full' });
+      return toolJson(result);
+    } catch (err) {
+      return toolError(err.message);
+    }
   }
 
   return null;

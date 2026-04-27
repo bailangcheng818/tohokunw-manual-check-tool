@@ -82,7 +82,7 @@ OUTPUT_DIR=~/Desktop/tohokunw-manual-check-output
 - `POST /generate/:asset_type`
 - `POST /generate/:asset_type/download`
 - `POST /ingest`
-- `POST /generate/from-edit`
+- `POST /generate/from-edit` — apply edit diff to a stored DOCX; supports `"paragraph"`, `"paragraph_runs"`, `"table_cell"`, `"header_paragraph"`, `"footer_paragraph"` edit types
 
 ### File discovery
 
@@ -101,6 +101,18 @@ OUTPUT_DIR=~/Desktop/tohokunw-manual-check-output
 - `POST /excel/edit-record`
 - `POST /excel/update-row` — update cells in a specific row by key-value
 - `GET /find-row/:file?column=&value=` — search for a row by column value
+
+### POST /generate/from-edit — edit types
+
+| `type` | Locator | Description |
+|--------|---------|-------------|
+| `"paragraph"` | `xml_index` (primary) + `old_text` (fallback / verification) | Replace entire paragraph text. Preserves first run's formatting. |
+| `"paragraph_runs"` | `xml_index` (primary) + `old_text` (fallback) | Replace paragraph content with a multi-run spec. Each run can independently set `bold`, `underline`, `color`. Font/size inherited from first original run. |
+| `"table_cell"` | `table_index`, `row`, `col` (0-based) | Replace a single table cell. |
+| `"header_paragraph"` | `part` (e.g. `"header1"`), `xml_index` | Edit a paragraph inside a Word header. |
+| `"footer_paragraph"` | `part` (e.g. `"footer1"`), `xml_index` | Edit a paragraph inside a Word footer. |
+
+`para_id` and `xml_index` are assigned during `/ingest` / `/pre-ingest-folder` and stored in `scheme.json` under each paragraph entry. Pass `xml_index` for deterministic addressing; `old_text` is optional but recommended as a mismatch guard.
 
 ### Backward-compatible aliases
 
@@ -125,9 +137,14 @@ MANUAL_DATABASE_DIR/
     保安規程_v3.docx          ← プライマリ文書（フォルダ名と一致するファイルが優先）
     気づき管理表(AI用).xlsx    ← 添付 Excel（pre-ingest 時に処理）
     別添1_フロー図.docx        ← 添付 Word
+    別紙/
+      別紙1_仕様表.xlsx        ← サブフォルダ内の添付ファイルも対象（1 段まで）
+      別紙2_フロー.xlsx
   緊急対応マニュアル/
     緊急対応マニュアル.docx
 ```
+
+サブフォルダは **1 段まで** 再帰的に探索されます。`list_files` / `read_file` / `pre-ingest-folder` のすべてで適用されます。
 
 ### GET /list-files
 
@@ -298,16 +315,18 @@ File discovery tools:
 
 ### DOCX Processing Flow
 
-1. **Paragraph & table extraction** — text content, headings, and tables are extracted from `word/document.xml` and stored in `scheme.json` + `content.txt`.
-2. **Raster image extraction** — embedded PNG/JPG images are extracted from `word/media/` via relationship entries, analyzed by Gemini Vision, and saved as `img_NNN.{ext}` with `img_NNN_meta.json`.
-3. **Drawing detection** — paragraphs containing the following are classified as `drawing` type and trigger page-level analysis:
+1. **Paragraph & table extraction** — text content, headings, and tables are extracted from `word/document.xml` and stored in `scheme.json` + `content.txt`. Each paragraph is assigned a `para_id` (`"p_001"`, `"p_002"`, ...) and `xml_index` (absolute position in the full `<w:p>` array) for stable addressing during edits. Run-level formatting (`bold`, `underline`, `color`) is also stored per paragraph.
+2. **Header / footer extraction** — `word/_rels/document.xml.rels` is parsed to discover header and footer XML parts. Text paragraphs are extracted from each part and stored in `scheme.headers` / `scheme.footers`.
+3. **Text box extraction** — `<w:txbx>` blocks inside `word/document.xml` are extracted and stored in `scheme.textboxes` (read-only; edit write-back is not currently supported).
+4. **Raster image extraction** — embedded PNG/JPG images are extracted from `word/media/` via relationship entries, analyzed by Gemini Vision, and saved as `img_NNN.{ext}` with `img_NNN_meta.json`.
+5. **Drawing detection** — paragraphs containing the following are classified as `drawing` type and trigger page-level analysis:
    - `<w:drawing><wp:anchor>` — anchored shapes, SmartArt, charts
    - `<mc:AlternateContent>` — complex drawing fallback markup
    - `<w:pict>` with `<v:shape>` or `<v:imagedata>` — VML-style drawings (simple `<v:line>` horizontal rules are excluded)
    - `<w:object>` — OLE embedded objects
-4. **Drawing → page images** — when drawings are detected, the DOCX is converted to per-page PNGs via LibreOffice + pdftoppm. Each drawing is mapped to its estimated page (linear interpolation); only those exact pages are analyzed (no ±1 tolerance spread). Pages whose PNG is under 150 KB are also skipped as text-only.
-5. **Drawing page LLM analysis** — each drawing page is sent to Gemini 2.5 Flash Vision with surrounding paragraph context. Results include `label`, `summary`, `figure_type`, `key_elements`, and `mermaid`.
-6. **Drawing pages saved as formal image entries** — analyzed drawing pages are saved as `img_NNN.png` (index continuing from raster images), with metadata written via `writeImageMeta()`. They appear in `images_summary` alongside raster images and are also persisted in `scheme.json` under `drawing_pages`.
+6. **Drawing → page images** — when drawings are detected, the DOCX is converted to per-page PNGs via LibreOffice + pdftoppm. Each drawing is mapped to its estimated page (linear interpolation); only those exact pages are analyzed (no ±1 tolerance spread). Pages whose PNG is under 150 KB are also skipped as text-only.
+7. **Drawing page LLM analysis** — each drawing page is sent to Gemini 2.5 Flash Vision with surrounding paragraph context. Results include `label`, `summary`, `figure_type`, `key_elements`, and `mermaid`.
+8. **Drawing pages saved as formal image entries** — analyzed drawing pages are saved as `img_NNN.png` (index continuing from raster images), with metadata written via `writeImageMeta()`. They appear in `images_summary` alongside raster images and are also persisted in `scheme.json` under `drawing_pages`.
 
 ### Ingest Response Shape
 
@@ -320,6 +339,12 @@ File discovery tools:
       "file_type": "docx",
       "image_count": 5,
       "drawing_count": 2,
+      "paragraphs": [
+        { "para_id": "p_001", "xml_index": 0, "type": "title", "text": "...", "runs": [{ "text": "...", "bold": false }], "size": 28, "align": "center" }
+      ],
+      "headers": [{ "part": "header1", "paragraphs": [{ "para_id": "p_001", "xml_index": 0, "text": "..." }] }],
+      "footers": [{ "part": "footer1", "paragraphs": [{ "para_id": "p_001", "xml_index": 0, "text": "..." }] }],
+      "textboxes": [{ "index": 0, "paragraphs": [{ "text": "..." }] }],
       "drawing_pages": [{ "page": 3, "img_ref": "img_004.png", "label": "...", "figure_type": "flowchart" }]
     },
     "images_summary": [

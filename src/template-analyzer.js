@@ -43,7 +43,11 @@ function extractRuns(paragraphXml) {
   const runMatches = paragraphXml.match(/<w:r[\s\S]*?<\/w:r>/g) || [];
 
   for (const runXml of runMatches) {
-    const textParts = [...runXml.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g)].map((m) => xmlDecode(m[1]));
+    const textParts = [...runXml.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g)].map((m) => {
+      const decoded = xmlDecode(m[1]);
+      // Strip entity-decoded OOXML namespace tags that leaked into text content
+      return decoded.replace(/<\/?[a-zA-Z][a-zA-Z0-9]*:[^>]{0,200}>/g, '');
+    });
     const text = textParts.join('');
     if (!text) continue;
 

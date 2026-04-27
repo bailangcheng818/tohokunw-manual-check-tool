@@ -41,6 +41,22 @@ function parseExtensions(extensions) {
   return new Set(extensions.split(',').map(e => e.trim().toLowerCase()));
 }
 
+// Collect files from dir and up to maxDepth levels of subdirectories (flat list).
+function collectFiles(dir, maxDepth = 1) {
+  const results = [];
+  function walk(currentDir, depth) {
+    for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+      if (entry.isFile()) {
+        results.push({ name: entry.name, fullPath: path.join(currentDir, entry.name) });
+      } else if (entry.isDirectory() && depth < maxDepth) {
+        walk(path.join(currentDir, entry.name), depth + 1);
+      }
+    }
+  }
+  walk(dir, 0);
+  return results;
+}
+
 /**
  * List manual folders under MANUAL_DATABASE_DIR (or a subfolder).
  * Each subdirectory is treated as one "manual unit".
@@ -60,7 +76,7 @@ async function listManualFolders({ folder, extensions } = {}) {
     if (!entry.isDirectory()) continue;
     const folderName = nfc(entry.name);
     const folderPath = path.join(baseDir, entry.name);
-    const files = fs.readdirSync(folderPath, { withFileTypes: true }).filter(f => f.isFile());
+    const files = collectFiles(folderPath);
     const filtered = files.filter(f => extFilter.has(path.extname(f.name).toLowerCase()));
     if (filtered.length === 0) continue;
 
@@ -71,18 +87,18 @@ async function listManualFolders({ folder, extensions } = {}) {
     if (!primary) primary = filtered[0];
 
     const primaryExt = path.extname(primary.name).toLowerCase();
-    const primaryStat = fs.statSync(path.join(folderPath, primary.name));
+    const primaryStat = fs.statSync(primary.fullPath);
 
     const attachments = filtered
       .filter(f => f.name !== primary.name)
       .map(f => {
         const ext = path.extname(f.name).toLowerCase();
-        const stat = fs.statSync(path.join(folderPath, f.name));
+        const stat = fs.statSync(f.fullPath);
         return { name: nfc(f.name), type: fileType(ext), ext, size_kb: Math.round(stat.size / 1024) };
       });
 
     const manifestEntry = getManifestEntry(folderName);
-    const entry = {
+    const manualEntry = {
       name: folderName,
       primary_doc: nfc(primary.name),
       type: fileType(primaryExt),
@@ -93,12 +109,12 @@ async function listManualFolders({ folder, extensions } = {}) {
       ref_id: manifestEntry?.ref_id || folderRefMap.get(folderName) || null,
       images_analyzed: manifestEntry?.images_analyzed || false,
     };
-    if (manifestEntry?.summary) entry.summary = manifestEntry.summary;
-    if (manifestEntry?.effective_date) entry.effective_date = manifestEntry.effective_date;
-    if (manifestEntry?.key_topics) entry.key_topics = manifestEntry.key_topics;
-    if (manifestEntry?.document_type) entry.document_type = manifestEntry.document_type;
-    if (manifestEntry?.attachment_summaries?.length) entry.attachment_summaries = manifestEntry.attachment_summaries;
-    manuals.push(entry);
+    if (manifestEntry?.summary) manualEntry.summary = manifestEntry.summary;
+    if (manifestEntry?.effective_date) manualEntry.effective_date = manifestEntry.effective_date;
+    if (manifestEntry?.key_topics) manualEntry.key_topics = manifestEntry.key_topics;
+    if (manifestEntry?.document_type) manualEntry.document_type = manifestEntry.document_type;
+    if (manifestEntry?.attachment_summaries?.length) manualEntry.attachment_summaries = manifestEntry.attachment_summaries;
+    manuals.push(manualEntry);
   }
 
   return { folder: baseDir, manuals, count: manuals.length };
@@ -140,7 +156,7 @@ async function readManualFolder({ folder_name, mode = 'full' } = {}) {
     throw Object.assign(new Error(`Folder not found: ${normalizedName}`), { statusCode: 404 });
   }
 
-  const files = fs.readdirSync(folderPath, { withFileTypes: true }).filter(f => f.isFile());
+  const files = collectFiles(folderPath);
 
   // Find primary document — NFC-compare stem vs folder name
   let primaryFile = files.find(f => {
@@ -156,7 +172,7 @@ async function readManualFolder({ folder_name, mode = 'full' } = {}) {
     );
   }
 
-  const primaryPath = path.join(folderPath, primaryFile.name);
+  const primaryPath = primaryFile.fullPath;
   const primaryExt = path.extname(primaryFile.name).toLowerCase();
   const primaryMtime = fs.statSync(primaryPath).mtime.toISOString();
 
@@ -224,7 +240,7 @@ async function readManualFolder({ folder_name, mode = 'full' } = {}) {
     files
       .filter(f => f.name !== primaryFile.name && DEFAULT_EXTS.has(path.extname(f.name).toLowerCase()))
       .map(async f => {
-        const fPath = path.join(folderPath, f.name);
+        const fPath = f.fullPath;
         const ext = path.extname(f.name).toLowerCase();
         const stat = fs.statSync(fPath);
         const info = { name: nfc(f.name), type: fileType(ext), ext, size_kb: Math.round(stat.size / 1024) };
@@ -245,4 +261,4 @@ function getFolderRef(folderName) {
   return folderRefMap.get(nfc(folderName)) || null;
 }
 
-module.exports = { listManualFolders, readManualFolder, getFolderRef };
+module.exports = { listManualFolders, readManualFolder, getFolderRef, collectFiles };
