@@ -82,7 +82,10 @@ OUTPUT_DIR=~/Desktop/tohokunw-manual-check-output
 - `POST /generate/:asset_type`
 - `POST /generate/:asset_type/download`
 - `POST /ingest`
-- `POST /generate/from-edit` — apply edit diff to a stored DOCX; supports `"paragraph"`, `"paragraph_runs"`, `"table_cell"`, `"header_paragraph"`, `"footer_paragraph"` edit types
+- `POST /generate/from-edit` — apply edit diff to a stored DOCX; supports `"paragraph"`, `"paragraph_runs"`, `"table_cell"`, `"table_row_append"`, `"header_paragraph"`, `"footer_paragraph"` edit types
+- `POST /edit/new-manual` — Dify ワークフロー出力形式の修正差分を受け取り、マークアップなしのクリーンな改正 DOCX を返す。`table_row_append` を含む全 edit type に対応
+- `POST /edit/comparison-test` — 元 DOCX の構造を保ったまま、旧文を取り消し線、新文を赤字段落、理由を Word コメントで可視化する検証用 DOCX を返す
+- `POST /edit/comparison` — Dify ワークフロー出力形式から新旧比較表 DOCX を生成（A3 横向き、元の書式をそのまま保持）
 
 ### File discovery
 
@@ -90,6 +93,8 @@ OUTPUT_DIR=~/Desktop/tohokunw-manual-check-output
 - `POST /read-file` — read a manual folder; serves full content + image summaries from cache when pre-ingested
 - `POST /pre-ingest-folder` — run full ingest (text + images + summary + attachments) and persist to manifest cache
 - `GET /ingest-status` — return the full manifest (which folders have been pre-ingested)
+- `GET /paragraphs/:ref_id` — return ingested paragraph list (`xml_index`, `type`, `text`) for a given `ref_id`; used by Dify LLM to determine correct `xml_index` values before sending edits
+- `GET /tables/:ref_id` — return ingested table list (`table_index`, `headers`, `row_count`) for a given `ref_id`; used by Dify LLM to determine correct `table_index` for `table_row_append` edits
 
 ### Excel
 
@@ -109,10 +114,131 @@ OUTPUT_DIR=~/Desktop/tohokunw-manual-check-output
 | `"paragraph"` | `xml_index` (primary) + `old_text` (fallback / verification) | Replace entire paragraph text. Preserves first run's formatting. |
 | `"paragraph_runs"` | `xml_index` (primary) + `old_text` (fallback) | Replace paragraph content with a multi-run spec. Each run can independently set `bold`, `underline`, `color`. Font/size inherited from first original run. |
 | `"table_cell"` | `table_index`, `row`, `col` (0-based) | Replace a single table cell. |
+| `"table_row_append"` | `table_index` (0-based), `new_text` (pipe-separated cell values) | Clone the last row of the target table and append it with new cell content. `new_text` format: `"val1\|val2\|val3\|"`. If fewer values than columns are supplied, remaining cells are left empty. |
 | `"header_paragraph"` | `part` (e.g. `"header1"`), `xml_index` | Edit a paragraph inside a Word header. |
 | `"footer_paragraph"` | `part` (e.g. `"footer1"`), `xml_index` | Edit a paragraph inside a Word footer. |
 
-`para_id` and `xml_index` are assigned during `/ingest` / `/pre-ingest-folder` and stored in `scheme.json` under each paragraph entry. Pass `xml_index` for deterministic addressing; `old_text` is optional but recommended as a mismatch guard.
+`para_id` and `xml_index` are assigned during `/ingest` / `/pre-ingest-folder` and stored in `scheme.json` under each paragraph entry. Pass `xml_index` for deterministic addressing; `old_text` acts as a mismatch guard — if the text at `xml_index` doesn't match `old_text`, the edit falls back to full-text search. Use `GET /paragraphs/:ref_id` to obtain the correct `xml_index` values before generating edits.
+
+### POST /edit/new-manual — Dify 形式で改正 DOCX を生成
+
+Dify ワークフローが出力する `amendment_edits`（JSON 文字列配列）を受け取り、修正を適用したクリーンな DOCX を返します。マークアップ・コメントなし。
+
+Request:
+
+```json
+{
+  "amendment_edits": "[{\"ref_id\":\"uuid\",\"type\":\"paragraph\",\"xml_index\":241,\"old_text\":\"旧テキスト\",\"new_text\":\"新テキスト\"}]",
+  "output_filename": "改正後_マニュアル",
+  "return_base64": false
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `amendment_edits` | ✅ | Dify 出力の JSON 文字列配列。各要素に `ref_id`（ingested 文書の識別子）、`type`、`xml_index`、`old_text`、`new_text` を含む |
+| `output_filename` | — | 出力ファイル名（拡張子なし） |
+| `return_base64` | — | `true` のとき `base64` フィールドを付加 |
+
+### POST /edit/comparison-test — 元 DOCX 上で変更箇所を可視化
+
+`/edit/new-manual` と同じく元の DOCX を ZIP ベースとして読み込み、本文構造を再構築せずに差分をその場へ挿入します。正式な比較表ではなく、元文書のページ構成・セクション・表をできるだけ保ったまま、変更箇所レビュー用の DOCX を返す検証用エンドポイントです。
+
+表示ルール:
+- 旧テキスト: 対象段落または対象セル内段落を取り消し線で残す
+- 新テキスト: 直後の新しい段落として追加し、赤字で表示する。元段落の `<w:pPr>` を継承する
+- 変更理由: `rationale` がある場合、新テキスト run に Word コメントとして付与する
+- ヘッダー・フッター: `header_paragraph` / `footer_paragraph` は `/edit/new-manual` と同じ単純置換。可視マークアップとコメントは付けない
+
+Request:
+
+```json
+{
+  "amendment_edits": "[{\"ref_id\":\"uuid\",\"type\":\"paragraph\",\"xml_index\":241,\"old_text\":\"旧テキスト\",\"new_text\":\"新テキスト\",\"rationale\":\"改正理由の説明\"}]",
+  "output_filename": "改正後_マニュアル_比較",
+  "return_base64": false
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `amendment_edits` | ✅ | Dify 出力の JSON 文字列配列。`/edit/new-manual` と同じ形式に加え、任意で `rationale` を指定できる |
+| `output_filename` | — | 出力ファイル名（拡張子なし） |
+| `return_base64` | — | `true` のとき `base64` フィールドを付加 |
+
+対応 edit type:
+
+| `type` | Behaviour |
+|--------|-----------|
+| `"paragraph"` | `xml_index` を優先し、なければ `old_text` で検索。旧段落を取り消し線にし、直後に赤字の新段落を追加 |
+| `"table_cell"` | `table_index`, `row`, `col` でセルを指定。セル内の元段落を取り消し線にし、同じセル内へ赤字の新段落を追加 |
+| `"table_row_append"` | `table_index` と `new_text`（パイプ区切り）でテーブルの最終行をクローンし、各セルを赤字テキストで新規行として追加。`rationale` は Word コメントとして付与 |
+| `"header_paragraph"` / `"footer_paragraph"` | 指定 header/footer part 内の段落を単純置換 |
+
+Response:
+
+```json
+{
+  "success": true,
+  "path": "/absolute/path/to/改正後_マニュアル_比較.docx",
+  "filename": "改正後_マニュアル_比較.docx",
+  "download_url": "http://localhost:3456/files/改正後_マニュアル_比較.docx",
+  "size_kb": 75
+}
+```
+
+### POST /edit/comparison — 新旧比較表 DOCX を生成
+
+A3 横向き、3 列（旧／新／備考）の繰り返しテーブル形式の新旧比較表 DOCX を生成します。元の DOCX をベースとして使用するため、段落スタイル・インデント・タブリーダー・Word テーブルなどの書式がそのまま保持されます。
+
+Request:
+
+```json
+{
+  "filename": "通信関係請負工事共通仕様書",
+  "date": "2026-04-28",
+  "amendment_edits": "[{\"ref_id\":\"uuid\",\"xml_index\":241,\"old_text\":\"旧テキスト\",\"new_text\":\"新テキスト\",\"rationale\":\"変更理由\"}]",
+  "output_filename": "新旧比較表",
+  "return_base64": false
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `filename` | — | マニュアル名（カバーページタイトルおよびヘッダー行の「旧」「新」ラベルに使用） |
+| `date` | — | カバーページに表示する作成日（例: `2026-04-28`） |
+| `amendment_edits` | ✅ | Dify 出力の JSON 文字列配列。`ref_id` で元の ingested 文書を特定し、`xml_index` または `old_text` で変更箇所を指定。テーブルセル内段落の `xml_index` も指定可能 |
+| `output_filename` | — | 出力ファイル名（拡張子なし） |
+
+`amendment_edits` の各要素:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `ref_id` | ✅ | ingest 済み文書の識別子 |
+| `xml_index` | 推奨 | 段落の絶対インデックス（ingest 時に付与）。テーブルセル内段落でも指定可能 |
+| `old_text` | — | 変更前テキスト。`xml_index` がない場合は全文一致でフォールバック検索 |
+| `new_text` | ✅ | 変更後テキスト（新列に赤字で表示） |
+| `rationale` | — | 変更理由（備考列に表示） |
+
+Response:
+
+```json
+{
+  "success": true,
+  "path": "/absolute/path/to/新旧比較表.docx",
+  "filename": "新旧比較表.docx",
+  "download_url": "http://localhost:3456/files/新旧比較表.docx",
+  "size_kb": 75
+}
+```
+
+比較表の構造:
+- カバーページ（タイトル・新旧比較表・作成日）→ 改ページ
+- 全セクションを網羅する 1 枚の 3 列テーブル（各ページでヘッダー行が繰り返される）
+- 変更なし行：旧・新の両列に元の書式のまま同一テキスト（Word テーブルを含む）
+- 変更あり行：旧列に取り消し線、新列に赤字かつ元の `<w:pPr>`（インデント・行間・タブストップ）を継承した新テキスト、備考列に変更理由
+- テーブルセル内段落の変更：対象セルのみ取り消し線／赤字を適用し、テーブル構造はそのまま保持
+- 描画オブジェクト：`<w:drawing>` / `<mc:AlternateContent>` は安全のためストリップし、テキスト部分のみ保持
 
 ### Backward-compatible aliases
 

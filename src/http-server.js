@@ -21,12 +21,14 @@ const {
   handleUpdateCell,
   handleUpdateRow,
 } = require('./excel-tools');
-const { HOST, MANUAL_DATABASE_DIR, OUTPUT_DIR, PORT, SERVICE_NAME, VERSION, safeFilename } = require('./config');
+const { HOST, MANUAL_DATABASE_DIR, OUTPUT_DIR, PORT, PUBLIC_URL, SERVICE_NAME, VERSION, safeFilename } = require('./config');
 const { listManualFolders, readManualFolder, collectFiles } = require('./file-discovery');
 const { handleIngest, processDocxFile, processDocFile, processExcelFile } = require('./ingest');
-const { createStore, getManifestEntry, setManifestEntry } = require('./file-store');
+const { createStore, getManifestEntry, setManifestEntry, readScheme } = require('./file-store');
 const { summarizeDocument } = require('./vertex-ai');
-const { applyEdits } = require('./edit-applier');
+const { applyEdits, parseDifyEdits } = require('./edit-applier');
+const { applyComparisonTestEdits } = require('./comparison-test');
+const { generateEditComparisonDoc } = require('./docx-generator');
 
 // ── Logger ────────────────────────────────────────────────────────────────────
 const C = {
@@ -239,6 +241,45 @@ app.post('/generate/from-edit', async (req, res) => {
   }
 });
 
+app.post('/edit/new-manual', async (req, res) => {
+  try {
+    const params = parseDifyEdits(req.body);
+    const result = await applyEdits(params);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/edit/comparison-test', async (req, res) => {
+  try {
+    const params = parseDifyEdits(req.body);
+    const result = await applyComparisonTestEdits(params);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/edit/comparison', async (req, res) => {
+  try {
+    const filenameBase = safeFilename(req.body.output_filename || 'comparison');
+    const outputPath   = path.join(OUTPUT_DIR, `${filenameBase}.docx`);
+    const result       = await generateEditComparisonDoc(req.body, outputPath);
+    const filename     = path.basename(outputPath);
+    res.json({
+      success:      true,
+      path:         result.path,
+      filename,
+      download_url: `${PUBLIC_URL}/files/${encodeURIComponent(filename)}`,
+      size_kb:      Math.round(result.buffer.length / 1024),
+      ...(req.body.return_base64 ? { base64: result.base64 } : {}),
+    });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
 app.post('/generate/:asset_type', async (req, res) => {
   const result = await generateAsset(req.params.asset_type, req.body || {});
   if (!result.success) return res.status(result.status || 500).json(result);
@@ -359,6 +400,7 @@ async function runPreIngestFolder(folderName) {
     const ext = path.extname(f.name).toLowerCase();
     return _PREINGEST_WORD_EXTS.has(ext) && f.name.normalize('NFC').slice(0, -ext.length) === normalizedName;
   });
+  if (!primaryFile) primaryFile = files.find(f => path.extname(f.name).toLowerCase() === '.docx');
   if (!primaryFile) primaryFile = files.find(f => _PREINGEST_WORD_EXTS.has(path.extname(f.name).toLowerCase()));
   if (!primaryFile) {
     throw Object.assign(new Error(`No Word document found in folder: ${normalizedName}`), { statusCode: 422 });
@@ -504,6 +546,39 @@ app.post('/pre-ingest-folder', async (req, res) => {
     }
     const result = await runPreIngestFolder(folder_name);
     res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+// Returns paragraphs with xml_index for a given ref_id.
+// Dify should call this after pre-ingest and pass the data to the LLM so it can
+// reference paragraphs by xml_index instead of old_text string matching.
+app.get('/paragraphs/:ref_id', (req, res) => {
+  try {
+    const scheme = readScheme(req.params.ref_id);
+    const paragraphs = (scheme.paragraphs || []).map(p => ({
+      xml_index: p.xml_index,
+      type:      p.type,
+      text:      p.text,
+    }));
+    res.json({ success: true, ref_id: req.params.ref_id, paragraphs });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ success: false, error: err.message });
+  }
+});
+
+// Returns table structure (headers, row count) for each table in the document.
+// Dify uses this to determine the correct table_index for table_row_append edits.
+app.get('/tables/:ref_id', (req, res) => {
+  try {
+    const scheme = readScheme(req.params.ref_id);
+    const tables = (scheme.tables || []).map((t, i) => ({
+      table_index: i,
+      headers:     t.rows?.[0] || [],
+      row_count:   t.rows?.length || 0,
+    }));
+    res.json({ success: true, ref_id: req.params.ref_id, tables });
   } catch (err) {
     res.status(err.statusCode || 500).json({ success: false, error: err.message });
   }

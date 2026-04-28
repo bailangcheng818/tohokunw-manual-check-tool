@@ -2,6 +2,34 @@
 
 ---
 
+## 2026-04-28
+
+### `/edit/comparison-test` in-place marked review DOCX
+
+**Context:** `/edit/comparison` rebuilds the whole document as an A3 landscape comparison table. That is useful for formal 新旧比較表 output, but it can introduce structure-level risks when the source DOCX has complex section grouping, Word tables, drawings, or other layout-sensitive XML.
+
+**Design decision:** Add a separate review endpoint that follows the proven `/edit/new-manual` strategy: keep the original DOCX ZIP/package intact and patch only the requested locations. Visual comparison is rendered inside the original document rather than by rebuilding the whole body.
+
+**Changes:**
+
+- `src/docx-generator.js`: exported the existing XML helpers used by the comparison renderer: `addStrikethroughToParaXml`, `buildRedTextParaXml`, `isParaXmlSafe`, and `buildFallbackParaXml`.
+- `src/edit-applier.js`: `parseDifyEdits()` now passes through optional `rationale`.
+- `src/comparison-test.js`: added `applyComparisonTestEdits()`. Body paragraph edits render old text with strikethrough, add new text as the next red paragraph, and inject `rationale` as a Word comment anchored to the new-text run. Table-cell edits keep the target cell and add the old/new marked paragraphs inside that cell. Header/footer paragraph edits fall back to clean replacement.
+- `src/http-server.js`: added `POST /edit/comparison-test`.
+- `docs/dify-tool.yaml` / `README.md`: documented the new endpoint.
+
+**Endpoint shape:**
+
+```json
+{
+  "amendment_edits": "[{\"ref_id\":\"uuid\",\"type\":\"paragraph\",\"xml_index\":241,\"old_text\":\"旧テキスト\",\"new_text\":\"新テキスト\",\"rationale\":\"改正理由\"}]",
+  "output_filename": "改正後_マニュアル_比較",
+  "return_base64": false
+}
+```
+
+---
+
 ## 2026-04-27
 
 ### Subfolder 別紙 file discovery

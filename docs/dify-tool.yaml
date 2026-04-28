@@ -130,6 +130,196 @@ paths:
       responses:
         '200':
           description: Append result
+  /paragraphs/{ref_id}:
+    get:
+      operationId: get_paragraphs
+      summary: Get paragraph list for a ref_id (xml_index + type + text)
+      description: >
+        Returns the ingested paragraph list for the given ref_id. Each entry includes
+        xml_index (use this in amendment_edits for deterministic addressing), type
+        (heading, body, table_cell, etc.), and the paragraph text. Call this before
+        generating edits so the LLM can select the correct xml_index.
+      parameters:
+        - name: ref_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paragraph list with xml_index values
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  ref_id:
+                    type: string
+                  paragraphs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        xml_index:
+                          type: integer
+                        type:
+                          type: string
+                        text:
+                          type: string
+  /tables/{ref_id}:
+    get:
+      operationId: get_tables
+      summary: Get table list for a ref_id (table_index + headers + row_count)
+      description: >
+        Returns the ingested table list for the given ref_id. Each entry includes
+        table_index (0-based, use this in table_row_append edits), headers (first row
+        cell values), and row_count. Call this before generating table_row_append edits
+        to determine the correct table_index.
+      parameters:
+        - name: ref_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Table list with table_index values
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  ref_id:
+                    type: string
+                  tables:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        table_index:
+                          type: integer
+                        headers:
+                          type: array
+                          items:
+                            type: string
+                        row_count:
+                          type: integer
+  /edit/new-manual:
+    post:
+      operationId: edit_new_manual
+      summary: Apply edit diff (Dify format) and return clean corrected manual DOCX
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - amendment_edits
+              properties:
+                filename:
+                  type: string
+                  description: Document filename (used for output naming)
+                amendment_edits:
+                  type: string
+                  description: JSON string array of edit objects, each with ref_id, type, old_text, new_text, etc.
+                output_filename:
+                  type: string
+                return_base64:
+                  type: boolean
+      responses:
+        '200':
+          description: Clean edited DOCX (no markup, no annotations)
+  /edit/comparison-test:
+    post:
+      operationId: edit_comparison_test
+      summary: Apply Dify edit diff in-place and return a marked-up review DOCX
+      description: >
+        Applies edits to the original DOCX in-place instead of rebuilding a
+        separate comparison table. Changed body paragraphs keep the old text
+        with strikethrough, insert the new text as the next paragraph in red,
+        and attach rationale as a Word comment anchored to the new-text run.
+        This preserves the original document structure for review. Table-cell
+        edits keep the target cell and add the old/new marked paragraphs inside
+        that cell. table_row_append edits clone the last row of the target table
+        and append a new row with each cell in red text. Header/footer paragraph
+        edits are handled as simple clean replacements without markup.
+        Use xml_index (from GET /paragraphs/:ref_id) for deterministic paragraph
+        addressing; old_text is used as a verification guard and fallback.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - amendment_edits
+              properties:
+                amendment_edits:
+                  type: string
+                  description: >
+                    JSON string array of edit objects. Each object must include
+                    ref_id, type, new_text, and either xml_index or old_text for
+                    paragraph edits; table_cell edits use table_index, row, col;
+                    table_row_append edits use table_index and pipe-separated new_text
+                    (e.g. "val1|val2|val3|"). Optional rationale is written as a Word
+                    balloon comment.
+                output_filename:
+                  type: string
+                return_base64:
+                  type: boolean
+      responses:
+        '200':
+          description: Marked-up review DOCX preserving the original document structure
+  /edit/comparison:
+    post:
+      operationId: edit_comparison
+      summary: Generate 新旧比較表 DOCX from Dify edit format (A3 landscape, original formatting preserved)
+      description: >
+        Generates an A3 landscape comparison DOCX covering the full manual.
+        The original DOCX is used as the ZIP base so all paragraph styles,
+        indentation, tab leaders, numbering, and Word tables are preserved verbatim.
+        Changed paragraphs show strikethrough in the 旧 column and red text
+        in the 新 column, with the original paragraph's <w:pPr> (indentation,
+        spacing, tab stops) inherited in the 新 column.
+        Edits targeting paragraphs inside Word table cells are also supported:
+        only the target cell paragraph is modified; the surrounding table
+        structure is kept intact.
+        The header row (旧/新/備考) repeats on every page.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - amendment_edits
+              properties:
+                filename:
+                  type: string
+                  description: Manual name used as column header (旧/新) and cover page title
+                date:
+                  type: string
+                  description: Creation date shown on cover page (e.g. 2026-04-28)
+                amendment_edits:
+                  type: string
+                  description: >
+                    JSON string array of edit objects. Each object must include ref_id
+                    (identifies the ingested source document), and either xml_index or
+                    old_text to locate the changed paragraph (xml_index works for both
+                    top-level body paragraphs and table-cell paragraphs), plus new_text
+                    and optionally rationale for the 備考 column.
+                output_filename:
+                  type: string
+                return_base64:
+                  type: boolean
+      responses:
+        '200':
+          description: Comparison DOCX with cover page and single 3-column table (旧/新/備考) repeating across pages
   /excel/edit-record:
     post:
       operationId: append_edit_record

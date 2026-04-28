@@ -120,6 +120,22 @@ function writeImageMeta(ref_id, index, meta) {
 }
 
 /**
+ * Read and parse scheme.json for a given ref_id.
+ * @param {string} ref_id
+ * @returns {object}
+ */
+function readScheme(ref_id) {
+  const storeDir = getStoreDir(ref_id);
+  const schemePath = path.join(storeDir, 'scheme.json');
+  if (!fs.existsSync(schemePath)) {
+    const err = new Error(`scheme.json not found for ref_id: ${ref_id}`);
+    err.statusCode = 404;
+    throw err;
+  }
+  return JSON.parse(fs.readFileSync(schemePath, 'utf8'));
+}
+
+/**
  * Read the original file buffer for a given ref_id.
  * @param {string} ref_id
  * @returns {Buffer}
@@ -141,6 +157,7 @@ module.exports = {
   writeImage,
   writeImageMeta,
   readOriginalBuffer,
+  readScheme,
   getManifestEntry,
   setManifestEntry,
   readImagesMeta,

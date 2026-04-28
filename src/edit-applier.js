@@ -29,6 +29,17 @@ function xmlEncode(str) {
     .replace(/'/g, '&apos;');
 }
 
+// Strip Markdown heading markers (### , ## , # ) from each line before matching.
+// Dify generates old_text from the Markdown representation of the DOCX, which uses
+// heading markers, but the actual DOCX paragraph text never contains them.
+function normalizeForMatch(text) {
+  return String(text || '')
+    .split('\n')
+    .map(line => line.replace(/^#{1,6}\s+/, ''))
+    .join('\n')
+    .trim();
+}
+
 /**
  * Extract concatenated plain text from a paragraph or cell XML block.
  */
@@ -186,25 +197,61 @@ function applyParagraphEdits(docXml, edits) {
     if (edit.xml_index != null) {
       const block = paraBlocks[edit.xml_index];
       if (block) {
-        if (edit.old_text && extractFullText(block).trim() !== edit.old_text.trim()) {
-          console.warn(`[edit-applier] para_id=${edit.para_id || edit.xml_index}: text mismatch (expected "${edit.old_text.slice(0, 40)}", found "${extractFullText(block).slice(0, 40)}")`);
-        }
-        const newBlock = applyParagraphEdit(block, extractFullText(block), edit.new_text);
-        if (newBlock !== null) {
-          docXml = docXml.replace(block, newBlock);
-          replaced = true;
+        const textOk = !edit.old_text ||
+          normalizeForMatch(extractFullText(block)) === normalizeForMatch(edit.old_text);
+        if (!textOk) {
+          // xml_index points to the wrong paragraph — fall through to text matching
+          console.warn(`[edit-applier] para_id=${edit.para_id || edit.xml_index}: text mismatch at xml_index ${edit.xml_index}, falling back to text search`);
+        } else {
+          const newBlock = applyParagraphEdit(block, extractFullText(block), edit.new_text);
+          if (newBlock !== null) {
+            docXml = docXml.replace(block, newBlock);
+            replaced = true;
+          }
         }
       }
     }
 
-    // Fallback: 従来の old_text マッチ（後方互換）
+    // Fallback: old_text マッチ（markdown heading 正規化 + 複数段落対応）
     if (!replaced && edit.old_text) {
+      const normalizedOld = normalizeForMatch(edit.old_text);
+
+      // single-paragraph match with normalization
       for (const block of paraBlocks) {
-        const newBlock = applyParagraphEdit(block, edit.old_text, edit.new_text);
+        if (normalizeForMatch(extractFullText(block)) !== normalizedOld) continue;
+        const newBlock = applyParagraphEdit(block, extractFullText(block), edit.new_text);
         if (newBlock !== null) {
           docXml = docXml.replace(block, newBlock);
           replaced = true;
           break;
+        }
+      }
+
+      // multi-paragraph match: old_text spans consecutive paragraphs (e.g. heading + body)
+      if (!replaced) {
+        const oldLines = normalizedOld.split('\n').filter(l => l.trim());
+        if (oldLines.length >= 2) {
+          outer:
+          for (let si = 0; si < paraBlocks.length; si++) {
+            let li = 0;
+            let ei = si - 1;
+            for (let pi = si; pi < paraBlocks.length && li < oldLines.length; pi++) {
+              const pt = normalizeForMatch(extractFullText(paraBlocks[pi])).trim();
+              if (!pt) continue;
+              if (pt !== oldLines[li]) break;
+              li++;
+              ei = pi;
+            }
+            if (li === oldLines.length) {
+              const firstBlock = paraBlocks[si];
+              const newBlock = applyParagraphEdit(firstBlock, extractFullText(firstBlock), edit.new_text);
+              if (newBlock !== null) {
+                docXml = docXml.replace(firstBlock, newBlock);
+                replaced = true;
+              }
+              break outer;
+            }
+          }
         }
       }
     }
@@ -328,6 +375,69 @@ function applyTableCellEdits(docXml, edits) {
 }
 
 // ---------------------------------------------------------------------------
+// Table row append  (type: 'table_row_append')
+// ---------------------------------------------------------------------------
+
+/**
+ * Clone the last row of a table and replace each cell's text with cellTexts[i].
+ * Returns the modified table XML, or null if no rows found.
+ */
+function appendTableRow(tblXml, cellTexts) {
+  const rows = tblXml.match(/<w:tr[ >][\s\S]*?<\/w:tr>/g) || [];
+  if (rows.length === 0) return null;
+
+  const templateRow = rows[rows.length - 1];
+  const cells = templateRow.match(/<w:tc[ >][\s\S]*?<\/w:tc>/g) || [];
+
+  let newRowXml = templateRow;
+  cells.forEach((cell, i) => {
+    const text = cellTexts[i] ?? '';
+    const runs = cell.match(/<w:r[ >][\s\S]*?<\/w:r>/g) || [];
+    let newCell;
+    if (runs.length > 0) {
+      const rPr = extractFirstRpr(runs[0]);
+      const newRun = `<w:r>${rPr}<w:t xml:space="preserve">${xmlEncode(text)}</w:t></w:r>`;
+      const start = cell.indexOf(runs[0]);
+      const last  = runs[runs.length - 1];
+      const end   = cell.lastIndexOf(last) + last.length;
+      newCell = cell.slice(0, start) + newRun + cell.slice(end);
+    } else {
+      const ins = cell.lastIndexOf('</w:tc>');
+      newCell = cell.slice(0, ins) +
+        `<w:p><w:r><w:t xml:space="preserve">${xmlEncode(text)}</w:t></w:r></w:p>` +
+        cell.slice(ins);
+    }
+    newRowXml = newRowXml.replace(cell, newCell);
+  });
+
+  return tblXml.replace('</w:tbl>', newRowXml + '</w:tbl>');
+}
+
+function applyTableRowAppends(docXml, edits) {
+  const appendEdits = edits.filter(e => e.type === 'table_row_append');
+  if (appendEdits.length === 0) return docXml;
+
+  for (const edit of appendEdits) {
+    const tables = extractTopLevelTables(docXml);
+    const idx = edit.table_index ?? 0;
+    if (idx >= tables.length) {
+      console.warn(`[edit-applier] table_row_append: table_index ${idx} out of range (${tables.length} tables)`);
+      continue;
+    }
+    const cellTexts = String(edit.new_text || '').split('|').map(s => s.trim());
+    const table = tables[idx];
+    const newTblXml = appendTableRow(table.xml, cellTexts);
+    if (!newTblXml) {
+      console.warn(`[edit-applier] table_row_append: could not append to table ${idx}`);
+      continue;
+    }
+    docXml = docXml.slice(0, table.start) + newTblXml + docXml.slice(table.end);
+    console.log(`[edit-applier] table_row_append: appended row to table ${idx}`);
+  }
+  return docXml;
+}
+
+// ---------------------------------------------------------------------------
 // Main: applyEdits
 // ---------------------------------------------------------------------------
 
@@ -364,6 +474,7 @@ async function applyEdits({ ref_id, edits, output_filename, return_base64 = fals
   docXml = applyParagraphEdits(docXml, edits);
   docXml = applyRunsEdits(docXml, edits);
   docXml = applyTableCellEdits(docXml, edits);
+  docXml = applyTableRowAppends(docXml, edits);
 
   zip.file('word/document.xml', docXml);
 
@@ -399,4 +510,44 @@ async function applyEdits({ ref_id, edits, output_filename, return_base64 = fals
   return result;
 }
 
-module.exports = { applyEdits };
+/**
+ * Parse a Dify workflow output object into the format expected by applyEdits().
+ * Handles amendment_edits as a JSON string and ref_id nested inside each edit.
+ */
+function parseDifyEdits(body) {
+  // Dify may send the array directly as the request body instead of wrapping it
+  const rawEdits = Array.isArray(body)
+    ? body
+    : typeof body.amendment_edits === 'string'
+      ? JSON.parse(body.amendment_edits)
+      : body.amendment_edits;
+
+  if (!Array.isArray(rawEdits) || rawEdits.length === 0) {
+    const err = new Error('amendment_edits is empty or invalid');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const ref_id = rawEdits[0]?.ref_id;
+  const edits = rawEdits.map(e => ({
+    type:        e.type || 'paragraph',
+    xml_index:   e.xml_index ?? undefined,
+    old_text:    e.old_text,
+    new_text:    e.new_text,
+    rationale:   e.rationale ?? undefined,
+    para_id:     e.para_id ?? undefined,
+    table_index: e.table_index ?? undefined,
+    row:         e.row ?? undefined,
+    col:         e.col ?? undefined,
+    part:        e.part ?? undefined,
+  }));
+
+  return {
+    ref_id,
+    edits,
+    output_filename: body.output_filename,
+    return_base64:   body.return_base64 || false,
+  };
+}
+
+module.exports = { applyEdits, parseDifyEdits };
